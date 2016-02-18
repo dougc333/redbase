@@ -1,7 +1,7 @@
 This is a clone and redo from: yifei: https://github.com/yifeih/redbase
 
 I lost everything...
-
+install glibc-devel.i686
 
 
 redbase
