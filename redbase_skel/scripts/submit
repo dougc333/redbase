@@ -1,0 +1,232 @@
+#!/bin/bash
+
+# Usage: submit <-c or -s> <HW #>
+# 
+# c - Collect the files that are to be submitted.
+#     This argument causes the file submit.<Component Initials> to be
+#     created and displayed containing a list of the files that will get
+#     submitted by this script.
+# 
+# s - Submit the files.
+#     This argument causes the files listed in submit.<Component Initials>
+#     to be submitted.  If submit.<Component Initials> does not exist, it is
+#     created as for argument c.
+# 
+#     It is possible to call this script with argument "-c", edit the
+#     temporary file in case it does not contain the correct files,
+#     and then call the script with argument "-s" to submit the files.
+# 
+# The "HW #" should be the homework number for the current
+# submission.  The submit program uses the homework number to
+# automatically locate most of the files in the submission.
+# 
+# The number should be:
+#   1 - RM (Record Manager)
+#   2 - IX (Index Manager)
+#   3 - SM (Session Manager)
+#   4 - QL (Query Language)
+#   5 - EX (Extension)
+# 
+# The HW # is required every time that submit is run.
+# 
+# END OF USAGE
+
+# abort when anything goes wrong or an unset variable was used
+set -eu
+
+## Sanitize environment and set variables
+# make sure all commands in this script always runs the expected executables in the expected ways
+PATH=/usr/bin:/bin
+unset LD_PRELOAD
+# and all created files aren't readable by others
+umask 077
+
+# directory to collect submissions
+SUBMIT_PATH=/usr/class/cs346/redbase/submissions
+# default temporary directory
+: ${TMPDIR:=/tmp}
+
+## Some shorthands for showing messages
+color() {
+    # print color code when stdout is a tty
+    ! [ -t 1 ] ||
+    case $1 in
+        red)     echo -ne $'\\E[1;31m' ;;
+        green)   echo -ne $'\\E[1;32m' ;;
+        default) echo -ne $'\\E[0m'    ;;
+    esac
+}
+error() {
+    {
+        color red
+        echo "ERROR:" "$@"
+        color default
+    } >&2
+    false
+}
+usage() {
+    # Show the usage embedded as a block of comments in this script
+    sed -n '/# Usage: /,/# END OF USAGE/{ /# END OF USAGE/q; s/^# //p; }' <"$0"
+    [ $# -eq 0 ] || error "$@"
+}
+
+## Parse arguments
+# The first argument should be either -c or -s
+Mode=${1:-}
+is_verifying=false
+is_submitting=false
+case $Mode in
+    -c) is_verifying=true ;;
+    -s) is_submitting=true ;;
+    "") usage "Either -c or -s must be specified." ;;
+    *)
+        usage "Invalid first argument: '$Mode'"
+esac
+
+# The second argument is HW #
+HwNum=${2:-}
+case $HwNum in
+    "1") Part=rm ;;
+    "2") Part=ix ;;
+    "3") Part=sm ;;
+    "4") Part=ql ;;
+    "5") Part=ex ;;
+    "") usage "HW # argument must be specified." ;;
+    *) Part=NONE
+        usage "HW # argument not correctly specified: '$HwNum'"
+esac
+
+
+## Find the redbase root dir created by the setup script
+redbase_root_reached() { [ -d src -a -d lib -a -d build ]; }
+until redbase_root_reached || [ $PWD = / ]
+do cd ..
+done
+redbase_root_reached ||
+    error "You should first 'cd' to the directory containing your source code."
+
+
+
+## Prepare a list of file for submission
+filelist=src/submit.${Part}.txt
+# Create a new list of files for submission if it doesn't exist or when in checking mode
+if ! [ -r "$filelist" ] || {
+        $is_verifying &&
+        read -n 1 -p "Overwrite ${filelist}? ([Y]es/[n]o) " &&
+        echo &&
+        case $REPLY in [yY]) true ;; *) false ;; esac
+    }
+then
+    # Confirm overwriting before proceeding
+    # Create a new default list of files
+    should_submit() {
+        local found=false file=
+        for file; do
+            if [ -r "$file" ]; then
+                echo "$file" >>"$filelist".tmp
+                found=true
+            fi
+        done
+        $found ||
+            if [ $# -eq 1 ]; then
+                error "$file not found but should be submitted!"
+            else
+                error "None of these files are found: $*.  At least one of them should be submitted!"
+            fi
+    }
+    rm -f "$filelist".tmp
+    echo "Creating ${filelist}..."
+    # documentation
+    should_submit src/${Part}_DOC
+    # source files for the part
+    should_submit src/$Part*.{h,cc,C,cxx,cpp}
+    should_submit src/Makefile
+    case $Part in
+        ex|ql|sm) # later parts: 3-5
+            # redbase executables and their sources (whose name doesn't start with $Part)
+            should_submit src/redbase.{cc,C,cxx,cpp}
+            should_submit src/dbcreate.{cc,C,cxx,cpp}
+            should_submit src/dbdestroy.{cc,C,cxx,cpp}
+            should_submit src/redbase
+            should_submit src/dbcreate
+            should_submit src/dbdestroy
+            ;;
+        ix) # part 2
+            should_submit src/rm_rid.h
+            should_submit src/rm.h
+            should_submit src/pf.h
+            should_submit src/redbase.h
+            should_submit lib/libix.a
+            should_submit lib/librm.a
+            should_submit lib/libpf.a
+            ;;
+        rm) # part 1
+            should_submit src/pf.h
+            should_submit src/redbase.h
+            should_submit lib/librm.a
+            should_submit lib/libpf.a
+            ;;
+    esac
+    # rest of the source files
+    should_submit src/*.{h,cc,C,cxx,cpp,c,y,l}
+
+    # drop duplicate entires in the file list
+    awk '!seen[$0]++ {print $0}' <"$filelist".tmp >"$filelist"
+    rm -f "$filelist".tmp
+fi
+
+## Submit files listed in $filelist
+if $is_submitting; then
+
+    # Sanity check of environment before proceeding
+    case $(hostname) in
+        corn[0-9]*.stanford.edu|cardinal*.stanford.edu|myth[0-9]*)
+            [ -d "$SUBMIT_PATH" ] ||
+                error "Submission destination ($SUBMIT_PATH) does not exist!"
+            ;;
+        *)
+            error "This script can only be run from one of the FarmShare or CS (corn, cardinal, or myth) machines."
+            ;;
+    esac
+
+    # Prepare a temporary directory for staging and creating tarball
+    tmpdir=$(mktemp -d ${TMPDIR:-/tmp}/redbase-submit.XXXXXX)
+    trap "rm -rf $tmpdir" EXIT
+    stagedir=$tmpdir/stage
+    tarball=$tmpdir/$USER.$HwNum-$Part.$(date +%Y%m%d-%H%M%S).tar.gz
+
+    # Stage the files enumerated in $filelist
+    echo "Copying your files to ${stagedir}/..."
+    while read filename; do
+        d="$stagedir/$(dirname "$filename")"
+        mkdir -p "$d"
+        echo "  $filename"
+        cp -p "$filename" "$d"/ ||
+            error "Could not make a copy of ${filename}. Make sure you have correctly listed it in ${filelist}."
+    done <"$filelist"
+
+    # Create a tarball of the staged ones.
+    echo "Creating ${tarball}..."
+    tar czf "$tarball" -C "$stagedir" .
+
+    # Submit the files to the submission directory.
+    echo "Placing it under $SUBMIT_PATH/..."
+    mv -f "$tarball" "$SUBMIT_PATH"/
+
+    color green
+    echo
+    echo "SUCCESS! Your work for RedBase Part ${HwNum} (${Part}) has been submitted."
+    color default
+
+## Or, just show the list of files to be submitted
+else
+    cat "$filelist"
+
+    cat <<-EOF
+	
+	Verify that all of your source files, libraries (*.a), and
+	executables that need to be submitted are listed above.
+	Edit the file '$filelist' to include files that are missing.
+	Execute 'submit -s <HW #>' to submit the files.
+	EOF
+fi
